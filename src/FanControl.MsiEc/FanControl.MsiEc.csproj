@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>FanControl.MsiEc</AssemblyName>
+    <RootNamespace>FanControl.MsiEc</RootNamespace>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Version>1.0.0</Version>
+    <Authors>Oleksii Melnyk</Authors>
+    <Description>FanControl plugin: fan monitoring and direct fan control for MSI laptops (PawnIO-based ACPI EC access)</Description>
+    <!-- Path to an installed FanControl (for FanControl.Plugins.dll reference) -->
+    <FanControlDir Condition="'$(FanControlDir)' == ''">C:\Users\Oleksii\FanControl</FanControlDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="FanControl.Plugins">
+      <HintPath>$(FanControlDir)\FanControl.Plugins.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Signed PawnIO module (LGPL-2.1, from https://github.com/namazso/PawnIO.Modules) -->
+    <EmbeddedResource Include="Modules\LpcACPIEC.bin" />
+  </ItemGroup>
+
+</Project>
