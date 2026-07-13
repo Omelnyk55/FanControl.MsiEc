@@ -7,8 +7,19 @@ public class MsiEcPlugin : IPlugin2
     /// <summary>EC firmware families verified to use the standard MSI register layout.</summary>
     private static readonly string[] KnownGoodFirmwarePrefixes = ["14B3EMS1"];
 
-    private const int ModeCheckEveryNUpdates = 5;
+    // EC traffic discipline: the Windows ACPI driver shares the EC with us and
+    // cannot be locked out, so every transaction we skip is a collision that
+    // cannot happen. Sensors are polled every 3rd cycle, duty writes within
+    // ±2 % are coalesced for up to 2 s (the EC ramps ~1 %/s anyway), the mode
+    // check runs twice a minute, and on repeated failures we back off entirely.
+    private const int PollEveryNUpdates = 3;
+    private const int ModeCheckEveryNUpdates = 30;
+    private const int WriteCoalesceDelta = 3;
+    private const int WriteCoalesceMs = 2000;
     private const int FailuresBeforeGivingUp = 5;
+    private const int FailuresBeforeBackoff = 3;
+    private const int BackoffInitialMs = 10_000;
+    private const int BackoffMaxMs = 60_000;
     private const int BoostOffHysteresis = 5;
 
     private readonly IPluginLogger? _logger;
@@ -27,8 +38,10 @@ public class MsiEcPlugin : IPlugin2
     private int _boostAtDuty = 100; // 1..100 enables Cooler Boost; else disabled
     private bool _boostActive;
 
-    private int _updatesSinceModeCheck;
+    private long _updateCounter;
     private int _consecutiveFailures;
+    private int _backoffMs = BackoffInitialMs;
+    private DateTime _suspendedUntilUtc = DateTime.MinValue;
 
     public MsiEcPlugin(IPluginLogger logger, IPluginDialog dialog)
     {
@@ -135,26 +148,34 @@ public class MsiEcPlugin : IPlugin2
     {
         lock (_lock)
         {
-            if (_msi is null || !_compatible)
+            if (_msi is null || !_compatible || DateTime.UtcNow < _suspendedUntilUtc)
                 return;
 
+            _updateCounter++;
             try
             {
+                // Apply any duty change that was coalesced earlier.
                 foreach (var channel in ActiveChannels())
                 {
-                    var status = _msi.ReadStatus(channel.Regs);
-                    channel.Temp = status.Temp;
-                    channel.Percent = status.Percent;
-                    channel.Rpm = status.Rpm;
+                    if (channel.PendingDuty is int pending && pending != channel.LastApplied && IsWriteEligible(channel, pending))
+                        ApplyDuty(channel, pending);
                 }
 
-                _consecutiveFailures = 0;
+                if (_updateCounter % PollEveryNUpdates == 0)
+                {
+                    foreach (var channel in ActiveChannels())
+                    {
+                        var status = _msi.ReadStatus(channel.Regs);
+                        channel.Temp = status.Temp;
+                        channel.Percent = status.Percent;
+                        channel.Rpm = status.Rpm;
+                    }
+                }
 
                 // The EC can fall back to auto mode on its own (e.g. after
                 // resume from sleep) — re-assert manual control if we own it.
-                if (AnyControlActive() && ++_updatesSinceModeCheck >= ModeCheckEveryNUpdates)
+                if (AnyControlActive() && _updateCounter % ModeCheckEveryNUpdates == 0)
                 {
-                    _updatesSinceModeCheck = 0;
                     if (_msi.ReadFanMode() != MsiEc.FanModeAdvanced)
                     {
                         Log("Fan mode drifted back to auto, re-applying manual duty");
@@ -171,15 +192,13 @@ public class MsiEcPlugin : IPlugin2
                         _msi.SetCoolerBoost(true);
                     }
                 }
+
+                _consecutiveFailures = 0;
+                _backoffMs = BackoffInitialMs;
             }
             catch (Exception e) when (e is IOException or TimeoutException)
             {
-                if (++_consecutiveFailures == FailuresBeforeGivingUp)
-                {
-                    Log("EC reads keep failing: " + e.Message);
-                    foreach (var channel in ActiveChannels())
-                        channel.Temp = channel.Percent = channel.Rpm = null;
-                }
+                RegisterFailure(e);
             }
         }
     }
@@ -215,23 +234,50 @@ public class MsiEcPlugin : IPlugin2
                 return;
 
             var duty = (int)Math.Round(Math.Clamp(value, 0f, 100f));
-            if (channel.ControlActive && channel.LastApplied == duty)
+            if ((channel.ControlActive && channel.LastApplied == duty && channel.PendingDuty is null)
+                || channel.PendingDuty == duty)
                 return;
+
+            // Small nudges are coalesced (the EC ramps ~1 %/s, nothing is lost);
+            // during a failure backoff the value is parked the same way and
+            // flushed by Update() once access resumes.
+            if (DateTime.UtcNow < _suspendedUntilUtc || !IsWriteEligible(channel, duty))
+            {
+                channel.PendingDuty = duty;
+                return;
+            }
 
             try
             {
-                _msi.ApplyFlatSpeed(channel.Regs, duty);
-                if (!channel.ControlActive)
-                    Log($"Taking over {channel.Name} fan control, duty {duty}%");
-                channel.ControlActive = true;
-                channel.LastApplied = duty;
-                UpdateCoolerBoost();
+                ApplyDuty(channel, duty);
+                _consecutiveFailures = 0;
+                _backoffMs = BackoffInitialMs;
             }
-            catch (Exception e)
+            catch (Exception e) when (e is IOException or TimeoutException)
             {
+                channel.PendingDuty = duty; // retry via Update() after backoff
                 Log($"Set {channel.Name} ({duty}%) failed: " + e.Message);
+                RegisterFailure(e, quiet: true);
             }
         }
+    }
+
+    private static bool IsWriteEligible(Channel channel, int duty) =>
+        !channel.ControlActive
+        || channel.LastApplied is not int last
+        || Math.Abs(duty - last) >= WriteCoalesceDelta
+        || (DateTime.UtcNow - channel.LastWriteUtc).TotalMilliseconds >= WriteCoalesceMs;
+
+    private void ApplyDuty(Channel channel, int duty)
+    {
+        _msi!.ApplyFlatSpeed(channel.Regs, duty);
+        if (!channel.ControlActive)
+            Log($"Taking over {channel.Name} fan control, duty {duty}%");
+        channel.ControlActive = true;
+        channel.LastApplied = duty;
+        channel.PendingDuty = null;
+        channel.LastWriteUtc = DateTime.UtcNow;
+        UpdateCoolerBoost();
     }
 
     /// <summary>
@@ -262,10 +308,31 @@ public class MsiEcPlugin : IPlugin2
         }
     }
 
+    private void RegisterFailure(Exception e, bool quiet = false)
+    {
+        _consecutiveFailures++;
+
+        if (_consecutiveFailures == FailuresBeforeGivingUp)
+        {
+            Log("EC access keeps failing: " + e.Message);
+            foreach (var channel in ActiveChannels())
+                channel.Temp = channel.Percent = channel.Rpm = null;
+        }
+
+        if (_consecutiveFailures >= FailuresBeforeBackoff)
+        {
+            _suspendedUntilUtc = DateTime.UtcNow.AddMilliseconds(_backoffMs);
+            if (!quiet)
+                Log($"Backing off EC access for {_backoffMs / 1000}s (letting the ACPI driver recover)");
+            _backoffMs = Math.Min(_backoffMs * 2, BackoffMaxMs);
+        }
+    }
+
     internal void ResetFan(Channel channel)
     {
         lock (_lock)
         {
+            channel.PendingDuty = null;
             if (!channel.ControlActive || _msi is null || _snapshot is null)
                 return;
 
@@ -291,7 +358,7 @@ public class MsiEcPlugin : IPlugin2
     internal float? GetControlValue(Channel channel)
     {
         lock (_lock)
-            return channel.ControlActive ? channel.LastApplied : channel.Percent;
+            return channel.ControlActive ? (channel.PendingDuty ?? channel.LastApplied) : channel.Percent;
     }
 
     private void RestoreEverything()
@@ -354,6 +421,8 @@ public class MsiEcPlugin : IPlugin2
         public float? Rpm;
         public bool ControlActive;
         public int? LastApplied;
+        public int? PendingDuty;
+        public DateTime LastWriteUtc = DateTime.MinValue;
     }
 
     private sealed class DelegateSensor(string id, string name, Func<float?> read) : IPluginSensor

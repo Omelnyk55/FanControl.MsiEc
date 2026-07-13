@@ -73,34 +73,38 @@ internal sealed class MsiEc(AcpiEcIo ec)
     /// <summary>
     /// Direct fan control: switches the EC to advanced mode and writes a flat
     /// curve so the requested duty applies at any temperature, except the two
-    /// hottest bands which keep their safety floors.
+    /// hottest bands which keep their safety floors. Routine writes are not
+    /// individually verified — a single canary read-back catches a dropped
+    /// batch at a fraction of the EC traffic.
     /// </summary>
     public void ApplyFlatSpeed(FanRegs fan, int percent)
     {
         var duty = (byte)Math.Clamp(percent, 0, 100);
-        var writes = new List<(byte, byte)>(CurvePoints + 1);
 
         if (ReadFanMode() != FanModeAdvanced)
-            writes.Add((RegFanMode, FanModeAdvanced));
+            ec.WriteBytes([(RegFanMode, FanModeAdvanced)], verify: true);
 
+        var writes = new List<(byte, byte)>(CurvePoints);
         for (var i = 0; i < HotBandIndex; i++)
             writes.Add(((byte)(fan.CurveBase + i), duty));
         writes.Add(((byte)(fan.CurveBase + HotBandIndex), Math.Max(duty, (byte)HotBandMinDuty)));
         writes.Add(((byte)(fan.CurveBase + MaxBandIndex), (byte)100));
-
         ec.WriteBytes(writes);
+
+        if (ec.ReadByte(fan.CurveBase) != duty)
+            throw new IOException($"EC did not accept curve write @0x{fan.CurveBase:X2}");
     }
 
-    /// <summary>Restores one fan's curve table captured at startup.</summary>
+    /// <summary>Restores one fan's curve table captured at startup (verified).</summary>
     public void RestoreCurve(FanRegs fan, byte[] speeds)
     {
         var writes = new List<(byte, byte)>(CurvePoints);
         for (var i = 0; i < CurvePoints; i++)
             writes.Add(((byte)(fan.CurveBase + i), speeds[i]));
-        ec.WriteBytes(writes);
+        ec.WriteBytes(writes, verify: true);
     }
 
-    public void RestoreMode(byte mode) => ec.WriteBytes([(RegFanMode, mode)]);
+    public void RestoreMode(byte mode) => ec.WriteBytes([(RegFanMode, mode)], verify: true);
 
     public bool ReadCoolerBoost() => (ec.ReadByte(RegCoolerBoost) & CoolerBoostBit) != 0;
 

@@ -49,6 +49,12 @@ Sensor values update at FanControl's normal cycle; controls accept 0–100 %.
   module (port I/O restricted to the ACPI EC ports `0x62`/`0x66`), so it works
   with Windows Memory Integrity (HVCI) enabled. Transactions are serialized
   through the system-wide `Access_EC` mutex shared with other monitoring tools.
+- **ACPI-driver coexistence** (v1.2): the Windows kernel EC driver shares the
+  same ports and cannot be locked out, so the plugin never consumes a pending
+  EC response that may belong to the kernel (that desyncs battery/thermal
+  reporting), skips its cycle instead of interfering, keeps traffic minimal
+  (sensor poll every 3 s, duty writes within ±2 % coalesced, mode re-check
+  twice a minute) and backs off exponentially when the EC misbehaves.
 
 ## Configuration (optional)
 
