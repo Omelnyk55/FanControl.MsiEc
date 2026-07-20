@@ -37,7 +37,12 @@ internal sealed class MsiEc(AcpiEcIo ec)
 
     public readonly record struct FanStatus(float Temp, float Percent, float Rpm);
 
-    public sealed record Snapshot(byte FanMode, byte[] CpuCurve, byte[] GpuCurve);
+    /// <summary>
+    /// CoolerBoostBase is the boost register's non-boost bits captured while the
+    /// EC was healthy — all later boost writes are absolute values derived from
+    /// it, never read-modify-write of a live (possibly corrupted) read.
+    /// </summary>
+    public sealed record Snapshot(byte FanMode, byte[] CpuCurve, byte[] GpuCurve, byte CoolerBoostBase);
 
     public string ReadFirmwareVersion()
     {
@@ -60,7 +65,8 @@ internal sealed class MsiEc(AcpiEcIo ec)
 
     public byte ReadFanMode() => ec.ReadByte(RegFanMode);
 
-    public Snapshot CaptureSnapshot() => new(ReadFanMode(), ReadCurve(Cpu), ReadCurve(Gpu));
+    public Snapshot CaptureSnapshot() =>
+        new(ReadFanMode(), ReadCurve(Cpu), ReadCurve(Gpu), (byte)(ec.ReadByte(RegCoolerBoost) & ~CoolerBoostBit));
 
     private byte[] ReadCurve(FanRegs fan)
     {
@@ -89,10 +95,18 @@ internal sealed class MsiEc(AcpiEcIo ec)
             writes.Add(((byte)(fan.CurveBase + i), duty));
         writes.Add(((byte)(fan.CurveBase + HotBandIndex), Math.Max(duty, (byte)HotBandMinDuty)));
         writes.Add(((byte)(fan.CurveBase + MaxBandIndex), (byte)100));
-        ec.WriteBytes(writes);
 
-        if (ec.ReadByte(fan.CurveBase) != duty)
-            throw new IOException($"EC did not accept curve write @0x{fan.CurveBase:X2}");
+        // A canary mismatch can be a transient collision — retry once before
+        // declaring the write failed.
+        for (var attempt = 0; ; attempt++)
+        {
+            ec.WriteBytes(writes);
+            if (ec.ReadByte(fan.CurveBase) == duty)
+                return;
+            if (attempt >= 1)
+                throw new IOException($"EC did not accept curve write @0x{fan.CurveBase:X2}");
+            Thread.Sleep(100);
+        }
     }
 
     /// <summary>Restores one fan's curve table captured at startup (verified).</summary>
@@ -108,12 +122,14 @@ internal sealed class MsiEc(AcpiEcIo ec)
 
     public bool ReadCoolerBoost() => (ec.ReadByte(RegCoolerBoost) & CoolerBoostBit) != 0;
 
-    /// <summary>Sets/clears only the boost bit, preserving the rest of the register.</summary>
-    public void SetCoolerBoost(bool on)
+    /// <summary>
+    /// Writes an absolute boost register value composed from the snapshot's
+    /// known-good base bits. Never read-modify-write: a corrupted live read
+    /// must not be amplified into a corrupted write.
+    /// </summary>
+    public void SetCoolerBoost(bool on, byte baseBits)
     {
-        var current = ec.ReadByte(RegCoolerBoost);
-        var desired = (byte)(on ? current | CoolerBoostBit : current & ~CoolerBoostBit);
-        if (desired != current)
-            ec.WriteBytes([(RegCoolerBoost, desired)]);
+        var value = (byte)(on ? baseBits | CoolerBoostBit : baseBits);
+        ec.WriteBytes([(RegCoolerBoost, value)]);
     }
 }

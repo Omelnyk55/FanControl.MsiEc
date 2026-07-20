@@ -49,12 +49,22 @@ Sensor values update at FanControl's normal cycle; controls accept 0–100 %.
   module (port I/O restricted to the ACPI EC ports `0x62`/`0x66`), so it works
   with Windows Memory Integrity (HVCI) enabled. Transactions are serialized
   through the system-wide `Access_EC` mutex shared with other monitoring tools.
-- **ACPI-driver coexistence** (v1.2): the Windows kernel EC driver shares the
+- **ACPI-driver coexistence** (v1.2+): the Windows kernel EC driver shares the
   same ports and cannot be locked out, so the plugin never consumes a pending
   EC response that may belong to the kernel (that desyncs battery/thermal
   reporting), skips its cycle instead of interfering, keeps traffic minimal
-  (sensor poll every 3 s, duty writes within ±2 % coalesced, mode re-check
-  twice a minute) and backs off exponentially when the EC misbehaves.
+  (sensor poll every 5 s, duty writes within ±2 % coalesced, mode re-check
+  once a minute) and backs off exponentially when the EC misbehaves.
+- **EC health watchdog** (v1.3): every write anomaly, timeout or implausible
+  reading counts as evidence of bus contention; two within 10 minutes suspend
+  *all* EC writes for 15 minutes (the fan keeps its last duty, the EC-side
+  thermal failsafe stays active). Implausible sensor samples are discarded so
+  garbage never reaches your fan curves.
+- **Sleep/resume aware** (v1.3): resume is when the kernel talks to the EC the
+  most, so after any suspend/hang gap the plugin stays off the bus for 45 s,
+  then gently re-asserts control. All boost-register writes are absolute
+  values from a known-good startup snapshot — never read-modify-write — and
+  boost toggles at most once a minute with a wide 10 % hysteresis.
 
 ## Configuration (optional)
 

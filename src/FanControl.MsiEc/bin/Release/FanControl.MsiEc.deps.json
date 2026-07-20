@@ -6,7 +6,7 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v10.0": {
-      "FanControl.MsiEc/1.2.0": {
+      "FanControl.MsiEc/1.3.0": {
         "runtime": {
           "FanControl.MsiEc.dll": {}
         }
@@ -14,7 +14,7 @@
     }
   },
   "libraries": {
-    "FanControl.MsiEc/1.2.0": {
+    "FanControl.MsiEc/1.3.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

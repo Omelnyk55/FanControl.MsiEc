@@ -30,8 +30,8 @@ internal sealed class AcpiEcIo : IDisposable
     private const int MutexTimeoutMs = 2000;
     private const int Retries = 2;
     private const int RetryPauseMs = 30;
-    private const int PacingEveryNOps = 4;
-    private const int PacingPauseMs = 10;
+    private const int PacingEveryNOps = 3;
+    private const int PacingPauseMs = 15;
 
     private readonly IntPtr _handle;
     private readonly Mutex _mutex = new(false, @"Global\Access_EC");

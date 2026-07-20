@@ -8,7 +8,7 @@
     <RootNamespace>FanControl.MsiEc</RootNamespace>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <Version>1.2.0</Version>
+    <Version>1.3.0</Version>
     <Authors>Oleksii Melnyk</Authors>
     <Description>FanControl plugin: fan monitoring and direct fan control for MSI laptops (PawnIO-based ACPI EC access)</Description>
     <!-- Path to an installed FanControl (for FanControl.Plugins.dll reference) -->
